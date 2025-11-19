@@ -1,0 +1,492 @@
+openapi: 3.0.3
+info:
+  title: not-env API
+  description: API for not-env environment variable management system
+  version: 1.0.0
+servers:
+  - url: http://localhost:1212
+    description: Local development server
+  - url: https://not-env.example.com
+    description: Production server
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns the health status of the API
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+  /environments:
+    post:
+      summary: Create environment
+      description: Create a new environment. Requires APP_ADMIN permission.
+      operationId: createEnvironment
+      tags:
+        - Environments
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEnvironmentRequest'
+      responses:
+        '200':
+          description: Environment created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateEnvironmentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Environment with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      summary: List environments
+      description: List all environments in the organization. Requires APP_ADMIN permission.
+      operationId: listEnvironments
+      tags:
+        - Environments
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of environments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListEnvironmentsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /environments/{id}:
+    delete:
+      summary: Delete environment
+      description: Delete an environment and all its variables and keys. Requires APP_ADMIN permission.
+      operationId: deleteEnvironment
+      tags:
+        - Environments
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Environment ID
+      responses:
+        '204':
+          description: Environment deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /environment:
+    get:
+      summary: Get current environment
+      description: Get metadata for the current environment (based on API key). Works with any ENV_* key type.
+      operationId: getEnvironment
+      tags:
+        - Environment
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Environment metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentResponse'
+        '400':
+          description: Environment context required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      summary: Update environment
+      description: Update environment name and/or description. Requires ENV_ADMIN permission.
+      operationId: updateEnvironment
+      tags:
+        - Environment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEnvironmentRequest'
+      responses:
+        '204':
+          description: Environment updated successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /environment/keys:
+    get:
+      summary: Get environment keys
+      description: Get ENV_ADMIN and ENV_READ_ONLY keys for the current environment. Requires ENV_ADMIN permission.
+      operationId: getEnvironmentKeys
+      tags:
+        - Environment
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Environment keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentKeysResponse'
+        '400':
+          description: Environment context required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /variables:
+    get:
+      summary: List variables
+      description: List all variables in the current environment. Works with any ENV_* key type.
+      operationId: listVariables
+      tags:
+        - Variables
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of variables
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListVariablesResponse'
+        '400':
+          description: Environment context required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /variables/{key}:
+    get:
+      summary: Get variable
+      description: Get a single variable by key. Works with any ENV_* key type.
+      operationId: getVariable
+      tags:
+        - Variables
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Variable key
+      responses:
+        '200':
+          description: Variable value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VariableResponse'
+        '400':
+          description: Environment context required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Variable not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Set variable
+      description: Create or update a variable. Requires ENV_ADMIN permission.
+      operationId: setVariable
+      tags:
+        - Variables
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Variable key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetVariableRequest'
+      responses:
+        '204':
+          description: Variable set successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    delete:
+      summary: Delete variable
+      description: Delete a variable. Requires ENV_ADMIN permission.
+      operationId: deleteVariable
+      tags:
+        - Variables
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Variable key
+      responses:
+        '204':
+          description: Variable deleted successfully
+        '400':
+          description: Environment context required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: API key as Bearer token
+
+  schemas:
+    CreateEnvironmentRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Environment name
+          example: development
+        description:
+          type: string
+          description: Environment description
+          example: Development environment
+
+    CreateEnvironmentResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        organization_id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: development
+        description:
+          type: string
+          example: Development environment
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        keys:
+          type: object
+          properties:
+            env_admin:
+              type: string
+              description: ENV_ADMIN API key
+              example: dGVzdF9lbnZfYWRtaW5fa2V5X2hlcmU...
+            env_read_only:
+              type: string
+              description: ENV_READ_ONLY API key
+              example: dGVzdF9lbnZfcmVhZG9ubHlfa2V5X2hlcmU...
+
+    EnvironmentResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        organization_id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: development
+        description:
+          type: string
+          example: Development environment
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+
+    ListEnvironmentsResponse:
+      type: object
+      properties:
+        environments:
+          type: array
+          items:
+            $ref: '#/components/schemas/EnvironmentResponse'
+
+    UpdateEnvironmentRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          example: production
+        description:
+          type: string
+          example: Production environment
+
+    EnvironmentKeysResponse:
+      type: object
+      properties:
+        env_admin:
+          type: string
+          description: ENV_ADMIN API key (or placeholder if keys cannot be retrieved)
+          example: "[key exists - use CLI to view]"
+        env_read_only:
+          type: string
+          description: ENV_READ_ONLY API key (or placeholder if keys cannot be retrieved)
+          example: "[key exists - use CLI to view]"
+
+    VariableResponse:
+      type: object
+      properties:
+        key:
+          type: string
+          example: DB_HOST
+        value:
+          type: string
+          example: localhost
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:35:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:35:00Z"
+
+    ListVariablesResponse:
+      type: object
+      properties:
+        variables:
+          type: array
+          items:
+            $ref: '#/components/schemas/VariableResponse'
+
+    SetVariableRequest:
+      type: object
+      required:
+        - value
+      properties:
+        value:
+          type: string
+          example: localhost
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Bad Request
+        message:
+          type: string
+          example: Invalid request body
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
