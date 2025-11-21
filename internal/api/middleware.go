@@ -2,24 +2,34 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
+	"not-env-backend/internal/db"
 	"not-env-backend/internal/models"
+)
+
+const (
+	// KeyTypeAPPAdmin is the API key type for organization-level admin access
+	KeyTypeAPPAdmin = "APP_ADMIN"
+	// KeyTypeENVAdmin is the API key type for environment-level admin access
+	KeyTypeENVAdmin = "ENV_ADMIN"
+	// KeyTypeENVReadOnly is the API key type for environment-level read-only access
+	KeyTypeENVReadOnly = "ENV_READ_ONLY"
 )
 
 // AuthMiddleware validates API keys and attaches auth context to requests
 type AuthMiddleware struct {
-	db *sql.DB
+	db *gorm.DB
 }
 
 // NewAuthMiddleware creates a new auth middleware
-func NewAuthMiddleware(db *sql.DB) *AuthMiddleware {
+func NewAuthMiddleware(db *gorm.DB) *AuthMiddleware {
 	return &AuthMiddleware{db: db}
 }
 
@@ -45,38 +55,23 @@ func (m *AuthMiddleware) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Check all keys to find a match (we need to check all because we store hashes)
-		rows, err := m.db.Query(`
-			SELECT id, key_hash, type, organization_id, environment_id
-			FROM api_keys
-			WHERE revoked_at IS NULL
-		`)
-		if err != nil {
+		var apiKeys []db.APIKey
+		if err := m.db.Where("revoked_at IS NULL").Find(&apiKeys).Error; err != nil {
 			respondError(w, http.StatusInternalServerError, "database error")
 			return
 		}
-		defer rows.Close()
 
 		var authCtx *models.AuthContext
-		for rows.Next() {
-			var id int64
-			var hash string
-			var ktype string
-			var org int64
-			var env sql.NullInt64
-
-			if err := rows.Scan(&id, &hash, &ktype, &org, &env); err != nil {
-				continue
-			}
-
+		for _, key := range apiKeys {
 			// Compare API key with hash
-			if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(apiKey)); err == nil {
+			if err := bcrypt.CompareHashAndPassword([]byte(key.KeyHash), []byte(apiKey)); err == nil {
 				authCtx = &models.AuthContext{
-					KeyType:        ktype,
-					OrganizationID: org,
-					APIKeyID:       id,
+					KeyType:        key.Type,
+					OrganizationID: key.OrganizationID,
+					APIKeyID:       key.ID,
 				}
-				if env.Valid {
-					envID := env.Int64
+				if key.EnvironmentID.Valid {
+					envID := key.EnvironmentID.Int64
 					authCtx.EnvironmentID = &envID
 				}
 				break

@@ -1,9 +1,27 @@
+// Package main provides the not-env backend HTTP API server.
+//
+// The backend is a stateless Go HTTP server that:
+//   - Stores environment variables encrypted at rest using AES-256-GCM
+//   - Supports SQLite, PostgreSQL, and MySQL/MariaDB databases
+//   - Exposes a JSON API on port 1212
+//   - Auto-generates master encryption key and APP_ADMIN API key if not provided
+//   - Handles graceful shutdown on SIGTERM/SIGINT signals
+//
+// Main initialization flow:
+//   1. Validate environment variables (database type, connection details)
+//   2. Initialize crypto service (with auto-generated master key if needed)
+//   3. Connect to database and run migrations
+//   4. Ensure default organization and APP_ADMIN key exist
+//   5. Setup HTTP routes and middleware
+//   6. Start server with graceful shutdown handling
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +29,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"not-env-backend/internal/api"
 	"not-env-backend/internal/crypto"
@@ -23,10 +43,22 @@ const (
 	port = 1212
 )
 
+var version = "0.1.0"
+
 func main() {
 	// Validate environment variables
-	if err := validateEnvVars(); err != nil {
+	masterKey, err := validateEnvVars()
+	if err != nil {
 		log.Fatalf("Environment validation failed: %v", err)
+	}
+	if masterKey != "" {
+		log.Println("========================================")
+		log.Printf("NOT_ENV_MASTER_KEY was auto-generated:")
+		log.Printf("%s", masterKey)
+		log.Println("")
+		log.Println("IMPORTANT: Save this key securely!")
+		log.Println("You'll need it to restart the backend.")
+		log.Println("========================================")
 	}
 
 	// Initialize crypto
@@ -56,12 +88,17 @@ func main() {
 	log.Printf("Default organization ready (ID: %d)", orgID)
 
 	// Ensure APP_ADMIN key exists
-	appAdminKey, err := ensureAPPAdminKey(conn.DB, orgID)
+	appAdminKeyEnv := os.Getenv("NOT_ENV_APP_ADMIN_KEY")
+	appAdminKey, err := ensureAPPAdminKey(conn.DB, orgID, appAdminKeyEnv)
 	if err != nil {
 		log.Fatalf("Failed to ensure APP_ADMIN key: %v", err)
 	}
-	log.Printf("APP_ADMIN key: %s", appAdminKey)
-	log.Println("IMPORTANT: Save this APP_ADMIN key securely. It will not be shown again.")
+	if appAdminKeyEnv != "" && appAdminKey != "[APP_ADMIN key already exists - check logs from first startup]" {
+		log.Printf("APP_ADMIN key: %s (from NOT_ENV_APP_ADMIN_KEY)", appAdminKey)
+	} else {
+		log.Printf("APP_ADMIN key: %s", appAdminKey)
+		log.Println("IMPORTANT: Save this APP_ADMIN key securely. It will not be shown again.")
+	}
 
 	// Initialize handlers
 	handlers := api.NewHandlers(conn.DB, cryptoService)
@@ -72,32 +109,32 @@ func main() {
 
 	// Environment endpoints (APP_ADMIN)
 	mux.HandleFunc("POST /environments", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("APP_ADMIN")(handlers.CreateEnvironment),
+		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.CreateEnvironment),
 	))
 	mux.HandleFunc("GET /environments", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("APP_ADMIN")(handlers.ListEnvironments),
+		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.ListEnvironments),
 	))
 	mux.HandleFunc("DELETE /environments/", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("APP_ADMIN")(handlers.DeleteEnvironment),
+		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.DeleteEnvironment),
 	))
 
 	// Current environment endpoints
 	mux.HandleFunc("GET /environment", authMiddleware.RequireAuth(handlers.GetEnvironment))
 	mux.HandleFunc("PATCH /environment", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("ENV_ADMIN")(handlers.UpdateEnvironment),
+		authMiddleware.RequirePermission(api.KeyTypeENVAdmin)(handlers.UpdateEnvironment),
 	))
 	mux.HandleFunc("GET /environment/keys", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("ENV_ADMIN")(handlers.GetEnvironmentKeys),
+		authMiddleware.RequirePermission(api.KeyTypeENVAdmin)(handlers.GetEnvironmentKeys),
 	))
 
 	// Variable endpoints
 	mux.HandleFunc("GET /variables", authMiddleware.RequireAuth(handlers.ListVariables))
 	mux.HandleFunc("GET /variables/", authMiddleware.RequireAuth(handlers.GetVariable))
 	mux.HandleFunc("PUT /variables/", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("ENV_ADMIN")(handlers.SetVariable),
+		authMiddleware.RequirePermission(api.KeyTypeENVAdmin)(handlers.SetVariable),
 	))
 	mux.HandleFunc("DELETE /variables/", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission("ENV_ADMIN")(handlers.DeleteVariable),
+		authMiddleware.RequirePermission(api.KeyTypeENVAdmin)(handlers.DeleteVariable),
 	))
 
 	// Health check
@@ -125,26 +162,58 @@ func main() {
 
 	<-sigChan
 	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+	log.Println("Server stopped")
 }
 
-func validateEnvVars() error {
-	required := []string{"pg_url", "pg_username", "pg_password", "pg_db_name", "NOT_ENV_MASTER_KEY"}
-	for _, key := range required {
-		if os.Getenv(key) == "" {
-			return fmt.Errorf("missing required environment variable: %s", key)
+func validateEnvVars() (string, error) {
+	dbType := os.Getenv("DB_TYPE")
+	if dbType == "" {
+		return "", fmt.Errorf("missing required environment variable: DB_TYPE")
+	}
+
+	if dbType == "sqlite" {
+		if os.Getenv("DB_PATH") == "" {
+			return "", fmt.Errorf("missing required environment variable: DB_PATH")
 		}
+	} else if dbType == "postgres" || dbType == "mysql" {
+		required := []string{"DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"}
+		for _, key := range required {
+			if os.Getenv(key) == "" {
+				return "", fmt.Errorf("missing required environment variable: %s", key)
+			}
+		}
+	} else {
+		return "", fmt.Errorf("unsupported DB_TYPE: %s (supported: sqlite, postgres, mysql)", dbType)
 	}
-	return nil
+
+	// Auto-generate master key if not provided
+	masterKey := os.Getenv("NOT_ENV_MASTER_KEY")
+	if masterKey == "" {
+		keyBytes := make([]byte, 32)
+		if _, err := rand.Read(keyBytes); err != nil {
+			return "", fmt.Errorf("failed to generate master key: %w", err)
+		}
+		masterKey = base64.StdEncoding.EncodeToString(keyBytes)
+		os.Setenv("NOT_ENV_MASTER_KEY", masterKey)
+		return masterKey, nil
+	}
+
+	return "", nil
 }
 
-func ensureDefaultOrganization(db *sql.DB, cryptoService *crypto.Crypto) (int64, error) {
+func ensureDefaultOrganization(dbConn *gorm.DB, cryptoService *crypto.Crypto) (int64, error) {
 	// Check if organization exists
-	var orgID int64
-	err := db.QueryRow("SELECT id FROM organizations LIMIT 1").Scan(&orgID)
+	var org db.Organization
+	err := dbConn.First(&org).Error
 	if err == nil {
-		return orgID, nil
+		return org.ID, nil
 	}
-	if err != sql.ErrNoRows {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, fmt.Errorf("failed to check organization: %w", err)
 	}
 
@@ -159,48 +228,44 @@ func ensureDefaultOrganization(db *sql.DB, cryptoService *crypto.Crypto) (int64,
 		return 0, fmt.Errorf("failed to encrypt DEK: %w", err)
 	}
 
-	err = db.QueryRow(`
-		INSERT INTO organizations (name, encrypted_data_key, data_key_nonce)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (name) DO UPDATE SET name = organizations.name
-		RETURNING id
-	`, "default", encryptedDEK, nonce).Scan(&orgID)
-	if err != nil {
-		// If another instance created it, fetch it
-		if err := db.QueryRow("SELECT id FROM organizations WHERE name = $1", "default").Scan(&orgID); err != nil {
-			return 0, fmt.Errorf("failed to create or fetch organization: %w", err)
-		}
+	org = db.Organization{
+		Name:            "default",
+		EncryptedDataKey: encryptedDEK,
+		DataKeyNonce:    nonce,
 	}
 
-	return orgID, nil
+	if err := dbConn.Where("name = ?", "default").FirstOrCreate(&org).Error; err != nil {
+		return 0, fmt.Errorf("failed to create or fetch organization: %w", err)
+	}
+
+	return org.ID, nil
 }
 
-func ensureAPPAdminKey(db *sql.DB, orgID int64) (string, error) {
+func ensureAPPAdminKey(dbConn *gorm.DB, orgID int64, providedKey string) (string, error) {
 	// Check if APP_ADMIN key exists
-	var keyID int64
-	var keyHash string
-	err := db.QueryRow(`
-		SELECT id, key_hash
-		FROM api_keys
-		WHERE type = 'APP_ADMIN' AND organization_id = $1 AND revoked_at IS NULL
-		LIMIT 1
-	`, orgID).Scan(&keyID, &keyHash)
+	var existingKey db.APIKey
+	err := dbConn.Where("type = ? AND organization_id = ? AND revoked_at IS NULL", api.KeyTypeAPPAdmin, orgID).
+		First(&existingKey).Error
 	if err == nil {
 		// Key exists, but we can't return it since it's hashed
-		// For v1, we'll generate a new one only if none exists
-		// Actually, we should return an error or indicate it exists
 		return "[APP_ADMIN key already exists - check logs from first startup]", nil
 	}
-	if err != sql.ErrNoRows {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", fmt.Errorf("failed to check APP_ADMIN key: %w", err)
 	}
 
-	// Generate new APP_ADMIN key
-	keyBytes := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, keyBytes); err != nil {
-		return "", fmt.Errorf("failed to generate key: %w", err)
+	var apiKey string
+	if providedKey != "" {
+		// Use provided key
+		apiKey = providedKey
+	} else {
+		// Generate new APP_ADMIN key
+		keyBytes := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, keyBytes); err != nil {
+			return "", fmt.Errorf("failed to generate key: %w", err)
+		}
+		apiKey = base64.URLEncoding.EncodeToString(keyBytes)
 	}
-	apiKey := base64.URLEncoding.EncodeToString(keyBytes)
 
 	// Hash and store
 	keyHashBytes, err := bcrypt.GenerateFromPassword([]byte(apiKey), bcrypt.DefaultCost)
@@ -208,19 +273,18 @@ func ensureAPPAdminKey(db *sql.DB, orgID int64) (string, error) {
 		return "", fmt.Errorf("failed to hash key: %w", err)
 	}
 
-	_, err = db.Exec(`
-		INSERT INTO api_keys (key_hash, type, organization_id, environment_id)
-		VALUES ($1, 'APP_ADMIN', $2, NULL)
-		ON CONFLICT DO NOTHING
-	`, string(keyHashBytes), orgID)
-	if err != nil {
+	newKey := db.APIKey{
+		KeyHash:       string(keyHashBytes),
+		Type:          api.KeyTypeAPPAdmin,
+		OrganizationID: orgID,
+		EnvironmentID:  sql.NullInt64{Valid: false},
+	}
+
+	if err := dbConn.Create(&newKey).Error; err != nil {
 		// Check if another instance created it
-		var existingID int64
-		if err2 := db.QueryRow(`
-			SELECT id FROM api_keys
-			WHERE type = 'APP_ADMIN' AND organization_id = $1 AND revoked_at IS NULL
-			LIMIT 1
-		`, orgID).Scan(&existingID); err2 == nil {
+		var existingKey2 db.APIKey
+		if err2 := dbConn.Where("type = ? AND organization_id = ? AND revoked_at IS NULL", "APP_ADMIN", orgID).
+			First(&existingKey2).Error; err2 == nil {
 			return "[APP_ADMIN key already exists - check logs from first startup]", nil
 		}
 		return "", fmt.Errorf("failed to create APP_ADMIN key: %w", err)

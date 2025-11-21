@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
-	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 
+	"not-env-backend/internal/db"
 	"not-env-backend/internal/models"
 )
 
@@ -30,7 +32,7 @@ func TestRequireAuth(t *testing.T) {
 		name           string
 		authHeader     string
 		expectedStatus int
-		setupDB        func() *sql.DB
+		setupDB        func() *gorm.DB
 	}{
 		{
 			name:           "missing Authorization header",
@@ -61,26 +63,15 @@ func TestRequireAuth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create an in-memory SQLite database for testing
-			db, err := sql.Open("sqlite3", ":memory:")
+			// Create an in-memory SQLite database for testing using GORM
+			gormDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 			if err != nil {
 				t.Skipf("SQLite not available: %v", err)
 			}
-			defer db.Close()
 
-			// Setup schema
-			_, err = db.Exec(`
-				CREATE TABLE api_keys (
-					id INTEGER PRIMARY KEY,
-					key_hash TEXT NOT NULL,
-					type TEXT NOT NULL,
-					organization_id INTEGER NOT NULL,
-					environment_id INTEGER,
-					revoked_at DATETIME
-				)
-			`)
-			if err != nil {
-				t.Fatalf("failed to create table: %v", err)
+			// Setup schema using GORM AutoMigrate
+			if err := gormDB.AutoMigrate(&db.APIKey{}); err != nil {
+				t.Fatalf("failed to migrate: %v", err)
 			}
 
 			// For tests that need a valid key, add one
@@ -88,17 +79,19 @@ func TestRequireAuth(t *testing.T) {
 				// Add a test key to the database
 				testKey := "test-api-key-123"
 				keyHash, _ := bcrypt.GenerateFromPassword([]byte(testKey), bcrypt.DefaultCost)
-				_, err = db.Exec(`
-					INSERT INTO api_keys (key_hash, type, organization_id, environment_id)
-					VALUES (?, ?, ?, ?)
-				`, string(keyHash), "APP_ADMIN", 1, nil)
-				if err != nil {
+				testAPIKey := db.APIKey{
+					KeyHash:       string(keyHash),
+					Type:          "APP_ADMIN",
+					OrganizationID: 1,
+					EnvironmentID:  sql.NullInt64{Valid: false},
+				}
+				if err := gormDB.Create(&testAPIKey).Error; err != nil {
 					t.Fatalf("failed to insert test key: %v", err)
 				}
 			}
 
 			// Create middleware
-			middleware := NewAuthMiddleware(db)
+			middleware := NewAuthMiddleware(gormDB)
 			handler := middleware.RequireAuth(testHandler)
 
 			// Create request
@@ -167,13 +160,13 @@ func TestRequirePermission(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			db, err := sql.Open("sqlite3", ":memory:")
+			// Create an in-memory SQLite database for testing using GORM
+			gormDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 			if err != nil {
 				t.Skipf("SQLite not available: %v", err)
 			}
-			defer db.Close()
 
-			middleware := NewAuthMiddleware(db)
+			middleware := NewAuthMiddleware(gormDB)
 			permissionCheck := middleware.RequirePermission(tt.requiredTypes...)
 			handler := permissionCheck(testHandler)
 

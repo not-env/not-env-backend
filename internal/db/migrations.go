@@ -1,35 +1,72 @@
 package db
 
 import (
-	"database/sql"
 	"fmt"
+	"os"
 	"time"
 )
 
 const (
-	// MigrationLockID is a unique ID for the migration advisory lock
+	// MigrationLockID is a unique ID for the migration advisory lock (PostgreSQL only)
 	MigrationLockID = 1234567890
 )
 
-// RunMigrations runs all pending migrations with advisory lock coordination
+// RunMigrations runs all pending migrations with database-specific locking
 func (c *Connection) RunMigrations() error {
-	// Acquire advisory lock
-	_, err := c.DB.Exec("SELECT pg_advisory_lock($1)", MigrationLockID)
-	if err != nil {
-		return fmt.Errorf("failed to acquire migration lock: %w", err)
-	}
-	defer func() {
-		c.DB.Exec("SELECT pg_advisory_unlock($1)", MigrationLockID)
-	}()
+	dbType := os.Getenv("DB_TYPE")
 
-	// Create schema_migrations table if it doesn't exist
-	_, err = c.DB.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version VARCHAR(255) PRIMARY KEY,
-			applied_at TIMESTAMP NOT NULL DEFAULT NOW()
-		)
-	`)
-	if err != nil {
+	// Handle migration locking based on database type
+	if dbType == "postgres" {
+		// Use PostgreSQL advisory locks
+		sqlDB, err := c.DB.DB()
+		if err != nil {
+			return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+		}
+		_, err = sqlDB.Exec("SELECT pg_advisory_lock($1)", MigrationLockID)
+		if err != nil {
+			return fmt.Errorf("failed to acquire migration lock: %w", err)
+		}
+		defer func() {
+			sqlDB.Exec("SELECT pg_advisory_unlock($1)", MigrationLockID)
+		}()
+	} else if dbType == "mysql" {
+		// Use table-based locking for MySQL
+		sqlDB, err := c.DB.DB()
+		if err != nil {
+			return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+		}
+		// Create lock table if it doesn't exist
+		_, err = sqlDB.Exec(`
+			CREATE TABLE IF NOT EXISTS migration_lock (
+				id INT PRIMARY KEY,
+				locked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			) ENGINE=InnoDB
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create migration lock table: %w", err)
+		}
+
+		// Try to acquire lock (insert with unique constraint)
+		_, err = sqlDB.Exec("INSERT INTO migration_lock (id) VALUES (1)")
+		if err != nil {
+			// Lock already held, wait a bit and check
+			time.Sleep(100 * time.Millisecond)
+			var count int
+			err = sqlDB.QueryRow("SELECT COUNT(*) FROM migration_lock WHERE id = 1").Scan(&count)
+			if err != nil || count == 0 {
+				return fmt.Errorf("failed to acquire migration lock")
+			}
+			// Another instance is running migrations, wait for it
+			return fmt.Errorf("migration lock already held by another instance")
+		}
+		defer func() {
+			sqlDB.Exec("DELETE FROM migration_lock WHERE id = 1")
+		}()
+	}
+	// SQLite: No locking needed (single instance limitation)
+
+	// Ensure schema_migrations table exists (GORM will create it via AutoMigrate)
+	if err := c.DB.AutoMigrate(&SchemaMigration{}); err != nil {
 		return fmt.Errorf("failed to create schema_migrations table: %w", err)
 	}
 
@@ -39,115 +76,43 @@ func (c *Connection) RunMigrations() error {
 		return fmt.Errorf("failed to get applied migrations: %w", err)
 	}
 
-	// Run migrations in order
-	migrations := []Migration{
-		{
-			Version: "V1",
-			Up:      migrationV1,
-		},
+	// Check if V1 migration needs to be run
+	const migrationVersion = "V1"
+	if applied[migrationVersion] {
+		// Migration already applied, just ensure schema is up to date
+		if err := c.DB.AutoMigrate(&Organization{}, &Environment{}, &EnvironmentVariable{}, &APIKey{}); err != nil {
+			return fmt.Errorf("failed to run AutoMigrate: %w", err)
+		}
+		return nil
 	}
 
-	for _, migration := range migrations {
-		if applied[migration.Version] {
-			continue
-		}
+	// Run initial migration using GORM AutoMigrate
+	if err := c.DB.AutoMigrate(&Organization{}, &Environment{}, &EnvironmentVariable{}, &APIKey{}); err != nil {
+		return fmt.Errorf("migration %s failed: %w", migrationVersion, err)
+	}
 
-		if err := migration.Up(c.DB); err != nil {
-			return fmt.Errorf("migration %s failed: %w", migration.Version, err)
-		}
-
-		_, err = c.DB.Exec("INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)", migration.Version, time.Now())
-		if err != nil {
-			return fmt.Errorf("failed to record migration %s: %w", migration.Version, err)
-		}
+	// Record migration
+	migration := SchemaMigration{
+		Version:   migrationVersion,
+		AppliedAt: time.Now(),
+	}
+	if err := c.DB.Create(&migration).Error; err != nil {
+		return fmt.Errorf("failed to record migration %s: %w", migrationVersion, err)
 	}
 
 	return nil
-}
-
-// Migration represents a database migration
-type Migration struct {
-	Version string
-	Up      func(*sql.DB) error
 }
 
 func (c *Connection) getAppliedMigrations() (map[string]bool, error) {
-	rows, err := c.DB.Query("SELECT version FROM schema_migrations")
-	if err != nil {
-		return nil, err
+	var migrations []SchemaMigration
+	if err := c.DB.Find(&migrations).Error; err != nil {
+		// Table doesn't exist yet, return empty map
+		return make(map[string]bool), nil
 	}
-	defer rows.Close()
 
 	applied := make(map[string]bool)
-	for rows.Next() {
-		var version string
-		if err := rows.Scan(&version); err != nil {
-			return nil, err
-		}
-		applied[version] = true
+	for _, m := range migrations {
+		applied[m.Version] = true
 	}
-	return applied, rows.Err()
+	return applied, nil
 }
-
-// migrationV1 creates the initial schema
-func migrationV1(db *sql.DB) error {
-	queries := []string{
-		// organizations table
-		`CREATE TABLE IF NOT EXISTS organizations (
-			id SERIAL PRIMARY KEY,
-			name VARCHAR(255) NOT NULL UNIQUE,
-			encrypted_data_key BYTEA NOT NULL,
-			data_key_nonce BYTEA NOT NULL,
-			created_at TIMESTAMP NOT NULL DEFAULT NOW()
-		)`,
-
-		// environments table
-		`CREATE TABLE IF NOT EXISTS environments (
-			id SERIAL PRIMARY KEY,
-			organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-			name VARCHAR(255) NOT NULL,
-			description TEXT,
-			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			UNIQUE(organization_id, name)
-		)`,
-
-		// environment_variables table
-		`CREATE TABLE IF NOT EXISTS environment_variables (
-			id SERIAL PRIMARY KEY,
-			environment_id INTEGER NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-			key VARCHAR(255) NOT NULL,
-			value_encrypted BYTEA NOT NULL,
-			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			UNIQUE(environment_id, key)
-		)`,
-
-		// api_keys table
-		`CREATE TABLE IF NOT EXISTS api_keys (
-			id SERIAL PRIMARY KEY,
-			key_hash VARCHAR(255) NOT NULL UNIQUE,
-			type VARCHAR(50) NOT NULL CHECK (type IN ('APP_ADMIN', 'ENV_ADMIN', 'ENV_READ_ONLY')),
-			organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-			environment_id INTEGER REFERENCES environments(id) ON DELETE CASCADE,
-			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			revoked_at TIMESTAMP
-		)`,
-
-		// Indexes
-		`CREATE INDEX IF NOT EXISTS idx_environments_organization_id ON environments(organization_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_environment_variables_environment_id ON environment_variables(environment_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_api_keys_organization_id ON api_keys(organization_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_api_keys_environment_id ON api_keys(environment_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_api_keys_type ON api_keys(type)`,
-	}
-
-	for _, query := range queries {
-		if _, err := db.Exec(query); err != nil {
-			return fmt.Errorf("failed to execute migration query: %w", err)
-		}
-	}
-
-	return nil
-}
-

@@ -1,8 +1,38 @@
 # not-env-backend Requirements
 
-This document specifies the functional and non-functional requirements for not-env-backend.
+## Summary
 
-## Functional Requirements
+not-env-backend is a self-hosted HTTP(S) API server for managing environment variables. Key features:
+
+- **Database Support**: SQLite (MVP), PostgreSQL, MySQL/MariaDB
+- **Encryption**: AES-256-GCM encryption at rest with organization-level DEKs
+- **API Key Types**: 
+  - `APP_ADMIN`: Organization-level access (create/list/delete environments)
+  - `ENV_ADMIN`: Environment-level access (manage variables)
+  - `ENV_READ_ONLY`: Environment-level read-only access
+- **Auto-generation**: Master key and APP_ADMIN key auto-generated if not provided
+- **Multi-instance**: Stateless design supports horizontal scaling
+- **Port**: Fixed port 1212 (not configurable)
+
+## Quick Reference
+
+| Requirement | Specification |
+|-------------|---------------|
+| **Database Types** | SQLite, PostgreSQL, MySQL/MariaDB |
+| **ORM** | GORM |
+| **Encryption** | AES-256-GCM with master key + per-organization DEKs |
+| **API Authentication** | Bearer token (bcrypt-hashed API keys) |
+| **Port** | 1212 (fixed) |
+| **Language** | Go 1.21+ |
+| **Performance Target** | 100+ req/s per instance, <100ms p95 latency |
+
+## Detailed Requirements
+
+See appendices below for complete functional and non-functional requirements.
+
+---
+
+## Appendix A: Functional Requirements
 
 ### FR1: Environment Variable Storage
 
@@ -16,60 +46,65 @@ This document specifies the functional and non-functional requirements for not-e
 
 ### FR2: Database Support
 
-**FR2.1:** The backend must support PostgreSQL and PostgreSQL-compatible databases only.
+**FR2.1:** The backend must support multiple database types: SQLite, PostgreSQL, and MySQL/MariaDB.
 
 **FR2.2:** Supported databases include:
-- PostgreSQL
-- AWS Aurora Postgres
-- YugabyteDB (Postgres-compatible mode)
-- CockroachDB (Postgres-compatible mode)
+- SQLite (recommended for MVP and single-tenant deployments)
+- PostgreSQL (production-ready, supports horizontal scaling)
+- MySQL/MariaDB (production-ready, supports horizontal scaling)
 
-**FR2.3:** The backend must use PostgreSQL drivers and SQL features compatible across these databases.
+**FR2.3:** The backend must use GORM ORM to abstract database-specific differences.
 
-**FR2.4:** Other database types (MySQL, SQLite, etc.) are explicitly out of scope for v1.
+**FR2.4:** Database type is determined by the `DB_TYPE` environment variable.
 
 ### FR3: Startup Flow
 
 **FR3.1:** On startup, the backend must validate that all required environment variables are present:
-- `pg_url`
-- `pg_username`
-- `pg_password`
-- `pg_db_name`
-- `NOT_ENV_MASTER_KEY`
+- `DB_TYPE` (must be `sqlite`, `postgres`, or `mysql`)
+- `NOT_ENV_MASTER_KEY` (optional - will be auto-generated if not provided)
+- For SQLite: `DB_PATH`
+- For PostgreSQL/MySQL: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
 
-**FR3.2:** If any required environment variable is missing, the backend must exit with a clear error message.
+**FR3.2:** If any required environment variable (except `NOT_ENV_MASTER_KEY`) is missing, the backend must exit with a clear error message.
 
-**FR3.3:** The backend must connect to the PostgreSQL server using `pg_url`, `pg_username`, and `pg_password`.
+**FR3.3:** If `NOT_ENV_MASTER_KEY` is not provided, the backend must auto-generate a secure 32-byte base64-encoded key and display it prominently in the logs.
 
-**FR3.4:** The backend must check if `pg_db_name` exists. If it doesn't exist, the backend must attempt to create it.
+**FR3.4:** The backend must connect to the database using the appropriate driver based on `DB_TYPE`.
 
-**FR3.5:** If database creation fails because the database already exists (race condition), this must be treated as success.
+**FR3.5:** For PostgreSQL/MySQL, the backend must check if `DB_NAME` exists. If it doesn't exist, the backend must attempt to create it.
 
-**FR3.6:** The backend must connect to `pg_db_name` after ensuring it exists.
+**FR3.6:** If database creation fails because the database already exists (race condition), this must be treated as success.
 
-**FR3.7:** The backend must acquire a PostgreSQL advisory lock before running migrations.
+**FR3.7:** For SQLite, the backend must create the database file and directory if they don't exist.
 
-**FR3.8:** If the lock cannot be acquired immediately, the backend must wait until it becomes available.
+**FR3.8:** The backend must use database-specific locking before running migrations:
+- PostgreSQL: Advisory locks
+- MySQL: Table-based locking
+- SQLite: Single instance only (no locking needed)
 
-**FR3.9:** Once the lock is acquired, the backend must run all pending migrations sequentially.
+**FR3.9:** If the lock cannot be acquired immediately, the backend must wait until it becomes available.
 
-**FR3.10:** After migrations complete, the backend must release the advisory lock.
+**FR3.10:** Once the lock is acquired, the backend must run migrations using GORM AutoMigrate.
 
-**FR3.11:** The backend must ensure a default organization exists:
+**FR3.11:** After migrations complete, the backend must release the lock (advisory lock for PostgreSQL, table lock for MySQL).
+
+**FR3.12:** The backend must ensure a default organization exists:
 - If no organization exists, create one with name "default"
 - Generate a DEK (Data Encryption Key) for the organization
 - Encrypt the DEK with the master key
 - Store the encrypted DEK and nonce in the database
 - If an organization already exists (race condition), use the existing one
 
-**FR3.12:** The backend must ensure exactly one APP_ADMIN key exists:
-- If no APP_ADMIN key exists, generate and insert one
+**FR3.13:** The backend must ensure exactly one APP_ADMIN key exists:
+- Check for `NOT_ENV_APP_ADMIN_KEY` environment variable
+- If provided and no APP_ADMIN key exists, use the provided key
+- If not provided and no APP_ADMIN key exists, generate and insert one
 - If an APP_ADMIN key already exists (race condition), use the existing one
-- Display the APP_ADMIN key in logs on first startup
+- Display the APP_ADMIN key in logs on first startup (or indicate if it was provided via environment variable)
 
-**FR3.13:** The backend must start an HTTP server listening on port 1212.
+**FR3.14:** The backend must start an HTTP server listening on port 1212.
 
-**FR3.14:** The port 1212 is not configurable.
+**FR3.15:** The port 1212 is not configurable.
 
 ### FR4: Database Schema
 
@@ -120,7 +155,7 @@ This document specifies the functional and non-functional requirements for not-e
 
 ### FR5: Encryption
 
-**FR5.1:** The backend must use a master key from `NOT_ENV_MASTER_KEY` environment variable.
+**FR5.1:** The backend must use a master key from `NOT_ENV_MASTER_KEY` environment variable. If not provided, it must auto-generate one.
 
 **FR5.2:** The master key must be base64-encoded and 32 bytes (256 bits) when decoded.
 
@@ -231,22 +266,18 @@ Authorization: Bearer <API_KEY>
 
 ### FR10: Multi-Instance Support
 
-**FR10.1:** The backend must be stateless and support horizontal scaling.
+**FR10.1:** The backend must be stateless and support multiple instances sharing the same database.
 
-**FR10.2:** Multiple backend instances must be able to run simultaneously behind a load balancer.
+**FR10.2:** All instances must share the same database configuration and master key.
 
-**FR10.3:** All instances must share the same database configuration and master key.
+**FR10.3:** Migrations must be coordinated using database-specific locking (PostgreSQL advisory locks, MySQL table locks).
 
-**FR10.4:** Migrations must be coordinated using PostgreSQL advisory locks.
-
-**FR10.5:** Only one instance should run migrations at a time; others must wait.
-
-**FR10.6:** Organization and APP_ADMIN key creation must be idempotent:
+**FR10.4:** Organization and APP_ADMIN key creation must be idempotent:
 - Use database constraints and/or check-before-insert logic
 - Handle duplicate insert attempts from concurrent instances cleanly
 - Treat "already exists" as success
 
-## Non-Functional Requirements
+## Appendix B: Non-Functional Requirements
 
 ### NFR1: Performance
 
@@ -276,11 +307,9 @@ Authorization: Bearer <API_KEY>
 
 ### NFR4: Scalability
 
-**NFR4.1:** The backend must support horizontal scaling (multiple instances).
+**NFR4.1:** The backend is stateless and can run multiple instances sharing the same database.
 
-**NFR4.2:** Adding capacity must be done by starting additional backend containers.
-
-**NFR4.3:** All instances must share the same database and master key.
+**NFR4.2:** All instances must share the same database configuration and master key.
 
 ### NFR5: Observability
 
@@ -300,13 +329,13 @@ Authorization: Bearer <API_KEY>
 
 **NFR6.2:** The backend must use standard HTTP/JSON for all API communication.
 
-## Implementation Constraints
+## Appendix C: Implementation Constraints
 
 ### IC1: Technology Stack
 
 **IC1.1:** Language: Go 1.21+
 
-**IC1.2:** Database driver: `github.com/lib/pq`
+**IC1.2:** ORM: GORM (`gorm.io/gorm`)
 
 **IC1.3:** Encryption: `crypto/aes` with GCM mode
 
@@ -327,4 +356,3 @@ Authorization: Bearer <API_KEY>
 **IC3.1:** In v1, there is exactly one organization per deployment.
 
 **IC3.2:** The schema must support multiple organizations for future multi-tenant support.
-
