@@ -7,7 +7,7 @@ HTTP(S) API server for not-env, a self-hosted environment variable management sy
 | Task | Command |
 |------|---------|
 | **Start standalone (SQLite)** | `docker run -d -p 1212:1212 -v not-env-data:/data ghcr.io/not-env/not-env-standalone:latest` |
-| **Get APP_ADMIN key** | `docker logs not-env-backend \| grep "APP_ADMIN key"` |
+| **Get APP_ADMIN key** | `docker logs not-env-backend | grep "APP_ADMIN key"` |
 | **Health check** | `curl http://localhost:1212/health` |
 
 ## Overview
@@ -58,6 +58,24 @@ curl http://localhost:1212/health
 
 **Note:** The `-v not-env-data:/data` volume persists the SQLite database.
 
+### Restarting Standalone Container
+
+To restart with the same master key (preserving encrypted data):
+
+```bash
+# Stop and remove container (keeps volume)
+docker stop not-env-backend
+docker rm not-env-backend
+
+# Restart with saved master key
+docker run -d --name not-env-backend -p 1212:1212 \
+  -v not-env-data:/data \
+  -e NOT_ENV_MASTER_KEY="<your-saved-master-key>" \
+  ghcr.io/not-env/not-env-standalone:latest
+```
+
+**Warning:** If you lose the master key, all encrypted data becomes unrecoverable. Always save the master key from first startup logs.
+
 ## Advanced Configuration
 
 ### PostgreSQL
@@ -97,15 +115,120 @@ go run main.go
 
 ## Common Tasks
 
-### Specifying APP_ADMIN Key
+### Horizontal Scaling (Multiple Instances)
 
-Use `NOT_ENV_APP_ADMIN_KEY` to set a specific APP_ADMIN key (useful for horizontal scaling):
+For horizontal scaling, all instances must share the same master key and APP_ADMIN key:
 
 ```bash
-docker run -d -p 1212:1212 \
-  -e DB_TYPE=sqlite -e DB_PATH=/data/not-env.db \
-  -e NOT_ENV_APP_ADMIN_KEY="<your-app-admin-key>" \
+# Instance 1
+docker run -d --name not-env-backend-1 -p 1212:1212 \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  -e NOT_ENV_MASTER_KEY="<shared-master-key>" \
+  -e NOT_ENV_APP_ADMIN_KEY="<shared-app-admin-key>" \
+  ghcr.io/not-env/not-env:latest
+
+# Instance 2 (same keys, different port)
+docker run -d --name not-env-backend-2 -p 1213:1212 \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  -e NOT_ENV_MASTER_KEY="<shared-master-key>" \
+  -e NOT_ENV_APP_ADMIN_KEY="<shared-app-admin-key>" \
+  ghcr.io/not-env/not-env:latest
+```
+
+**Important:**
+- All instances must use the same `NOT_ENV_MASTER_KEY` to decrypt data
+- All instances must use the same `NOT_ENV_APP_ADMIN_KEY` for consistent admin access
+- Use external database (PostgreSQL/MySQL) for multi-instance deployments
+- Store keys securely using secrets management (Docker secrets, Kubernetes secrets, etc.)
+
+## Common Scenarios
+
+### Scenario 1: First-time Setup (Standalone)
+
+```bash
+# Start container
+docker run -d --name not-env-backend -p 1212:1212 \
+  -v not-env-data:/data \
   ghcr.io/not-env/not-env-standalone:latest
+
+# Save master key and APP_ADMIN key from logs
+docker logs not-env-backend | grep -E "(NOT_ENV_MASTER_KEY|APP_ADMIN key)"
+```
+
+**Important:** Save both keys immediately - you'll need the master key to restart, and the APP_ADMIN key to manage environments.
+
+### Scenario 2: Restart Container (Same Data)
+
+```bash
+# Stop and remove container (keeps volume)
+docker stop not-env-backend && docker rm not-env-backend
+
+# Restart with saved master key
+docker run -d --name not-env-backend -p 1212:1212 \
+  -v not-env-data:/data \
+  -e NOT_ENV_MASTER_KEY="<saved-master-key>" \
+  ghcr.io/not-env/not-env-standalone:latest
+```
+
+**Note:** The APP_ADMIN key is stored in the database, so you don't need to set it again. However, if you set `NOT_ENV_APP_ADMIN_KEY` explicitly, use the same value.
+
+### Scenario 3: Horizontal Scaling (Multiple Instances)
+
+```bash
+# Instance 1
+docker run -d --name not-env-1 -p 1212:1212 \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  -e NOT_ENV_MASTER_KEY="<shared-key>" \
+  -e NOT_ENV_APP_ADMIN_KEY="<shared-key>" \
+  ghcr.io/not-env/not-env:latest
+
+# Instance 2 (same keys, different port)
+docker run -d --name not-env-2 -p 1213:1212 \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  -e NOT_ENV_MASTER_KEY="<shared-key>" \
+  -e NOT_ENV_APP_ADMIN_KEY="<shared-key>" \
+  ghcr.io/not-env/not-env:latest
+```
+
+**Load balancing:** Use a load balancer (nginx, HAProxy, cloud load balancer) to distribute traffic across instances.
+
+### Scenario 4: Migration from Standalone to External Database
+
+```bash
+# 1. Export data from SQLite (if needed, use CLI to export variables)
+# 2. Set up PostgreSQL/MySQL database
+# 3. Start new backend with external database and same master key
+docker run -d --name not-env-backend -p 1212:1212 \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  -e NOT_ENV_MASTER_KEY="<same-master-key>" \
+  -e NOT_ENV_APP_ADMIN_KEY="<same-app-admin-key>" \
+  ghcr.io/not-env/not-env:latest
+# 4. Recreate environments and variables (master key allows decryption)
 ```
 
 ## API Reference

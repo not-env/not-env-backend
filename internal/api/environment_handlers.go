@@ -124,7 +124,47 @@ func (h *Handlers) CreateEnvironment(w http.ResponseWriter, r *http.Request) {
 // ListEnvironments handles GET /environments
 func (h *Handlers) ListEnvironments(w http.ResponseWriter, r *http.Request) {
 	authCtx, err := GetAuthContext(r)
-	if err != nil || authCtx.KeyType != KeyTypeAPPAdmin {
+	if err != nil {
+		respondError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// If ENV_ADMIN or ENV_READ_ONLY, return only their environment
+	if authCtx.KeyType == KeyTypeENVAdmin || authCtx.KeyType == KeyTypeENVReadOnly {
+		if authCtx.EnvironmentID == nil {
+			respondError(w, http.StatusBadRequest, "environment context required")
+			return
+		}
+
+		var dbEnv db.Environment
+		if err := h.db.Where("id = ?", *authCtx.EnvironmentID).First(&dbEnv).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				respondError(w, http.StatusNotFound, fmt.Sprintf("environment with ID %d not found", *authCtx.EnvironmentID))
+				return
+			}
+			respondError(w, http.StatusInternalServerError, "database error")
+			return
+		}
+
+		env := models.EnvironmentResponse{
+			ID:             dbEnv.ID,
+			OrganizationID: dbEnv.OrganizationID,
+			Name:           dbEnv.Name,
+			CreatedAt:      dbEnv.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:      dbEnv.UpdatedAt.Format(time.RFC3339),
+		}
+		if dbEnv.Description.Valid {
+			env.Description = dbEnv.Description.String
+		}
+
+		resp := models.ListEnvironmentsResponse{Environments: []models.EnvironmentResponse{env}}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// APP_ADMIN: return all environments
+	if authCtx.KeyType != KeyTypeAPPAdmin {
 		respondError(w, http.StatusForbidden, "APP_ADMIN permission required")
 		return
 	}
@@ -333,6 +373,26 @@ func (h *Handlers) GetEnvironmentKeys(w http.ResponseWriter, r *http.Request) {
 	resp := models.EnvironmentKeysResponse{
 		EnvAdmin:    envAdminMsg,
 		EnvReadOnly: envReadOnlyMsg,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// GetMe handles GET /me - returns current API key information
+func (h *Handlers) GetMe(w http.ResponseWriter, r *http.Request) {
+	authCtx, err := GetAuthContext(r)
+	if err != nil {
+		respondError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"key_type":        authCtx.KeyType,
+		"organization_id": authCtx.OrganizationID,
+	}
+	if authCtx.EnvironmentID != nil {
+		resp["environment_id"] = *authCtx.EnvironmentID
 	}
 
 	w.Header().Set("Content-Type", "application/json")

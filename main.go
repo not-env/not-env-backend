@@ -111,9 +111,7 @@ func main() {
 	mux.HandleFunc("POST /environments", authMiddleware.RequireAuth(
 		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.CreateEnvironment),
 	))
-	mux.HandleFunc("GET /environments", authMiddleware.RequireAuth(
-		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.ListEnvironments),
-	))
+	mux.HandleFunc("GET /environments", authMiddleware.RequireAuth(handlers.ListEnvironments))
 	mux.HandleFunc("DELETE /environments/", authMiddleware.RequireAuth(
 		authMiddleware.RequirePermission(api.KeyTypeAPPAdmin)(handlers.DeleteEnvironment),
 	))
@@ -126,6 +124,9 @@ func main() {
 	mux.HandleFunc("GET /environment/keys", authMiddleware.RequireAuth(
 		authMiddleware.RequirePermission(api.KeyTypeENVAdmin)(handlers.GetEnvironmentKeys),
 	))
+
+	// Me endpoint (all authenticated users)
+	mux.HandleFunc("GET /me", authMiddleware.RequireAuth(handlers.GetMe))
 
 	// Variable endpoints
 	mux.HandleFunc("GET /variables", authMiddleware.RequireAuth(handlers.ListVariables))
