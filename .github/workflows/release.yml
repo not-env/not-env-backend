@@ -17,6 +17,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
 
       - name: Extract version from tag
         id: version
@@ -39,11 +41,16 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/not-env/not-env:${{ steps.version.outputs.version }}
             ghcr.io/not-env/not-env:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Build and push SQLite image (multi-arch)
         uses: docker/build-push-action@v5
@@ -52,9 +59,14 @@ jobs:
           file: ./Dockerfile.sqlite
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/not-env/not-env-standalone:${{ steps.version.outputs.version }}
             ghcr.io/not-env/not-env-standalone:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
