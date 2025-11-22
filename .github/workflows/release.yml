@@ -42,7 +42,6 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          visibility: public
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
@@ -61,7 +60,6 @@ jobs:
           file: ./Dockerfile.sqlite
           platforms: linux/amd64,linux/arm64
           push: true
-          visibility: public
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
