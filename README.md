@@ -6,9 +6,11 @@ HTTP(S) API server for not-env, a self-hosted environment variable management sy
 
 | Task | Command |
 |------|---------|
-| **Start standalone (SQLite)** | `docker run -d -p 1212:1212 -v not-env-data:/data ghcr.io/not-env/not-env-standalone:latest` |
+| **Start backend (PostgreSQL)** | `docker run -d -p 1212:1212 -e DB_TYPE=postgres ... ghcr.io/not-env/not-env:latest` |
 | **Get APP_ADMIN key** | `docker logs not-env-backend | grep "APP_ADMIN key"` |
 | **Health check** | `curl http://localhost:1212/health` |
+
+**Note:** For standalone deployment (backend + frontend + SQLite), see the [root README](../README.md#available-docker-images).
 
 ## Overview
 
@@ -20,16 +22,16 @@ Stateless Go HTTP server that:
 
 ## Supported Databases
 
-- **SQLite** - Recommended for MVP (standalone image available)
-- **PostgreSQL** - Production-ready
+- **PostgreSQL** - Production-ready (recommended)
 - **MySQL/MariaDB** - Production-ready
+- **SQLite** - For standalone deployment only (see [root README](../README.md))
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `NOT_ENV_MASTER_KEY` | No | Auto-generated | Master encryption key (32 bytes, base64) |
-| `NOT_ENV_APP_ADMIN_KEY` | No | Auto-generated | APP_ADMIN API key (for horizontal scaling) |
+| `NOT_ENV_MASTER_KEY` | **Yes*** | Auto-generated on first startup | Master encryption key (32 bytes, base64) |
+| `NOT_ENV_APP_ADMIN_KEY` | No | Auto-generated (stored in DB) | APP_ADMIN API key (for horizontal scaling) |
 | `DB_TYPE` | Yes | - | Database type: `sqlite`, `postgres`, or `mysql` |
 | `DB_PATH` | Yes (SQLite only) | - | SQLite database file path |
 | `DB_HOST` | Yes (PostgreSQL/MySQL) | - | Database host |
@@ -38,16 +40,23 @@ Stateless Go HTTP server that:
 | `DB_PASSWORD` | Yes (PostgreSQL/MySQL) | - | Database password |
 | `DB_NAME` | Yes (PostgreSQL/MySQL) | - | Database name |
 
-**Note:** Auto-generated keys are displayed in logs on first startup. Save them securely.
+***`NOT_ENV_MASTER_KEY`:** Auto-generated on first startup, but **required for all subsequent startups**. If not provided on restart, you will lose access to all encrypted data. Save this key immediately after first startup.
 
 ## Quick Start
 
-### Standalone SQLite (Recommended)
+**For standalone deployment (backend + frontend + SQLite):** See the [root README](../README.md#available-docker-images).
+
+### Backend with PostgreSQL
 
 ```bash
 docker run -d --name not-env-backend -p 1212:1212 \
-  -v not-env-data:/data \
-  ghcr.io/not-env/not-env-standalone:latest
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
+  ghcr.io/not-env/not-env:latest
 
 # Get APP_ADMIN key
 docker logs not-env-backend | grep "APP_ADMIN key"
@@ -56,22 +65,25 @@ docker logs not-env-backend | grep "APP_ADMIN key"
 curl http://localhost:1212/health
 ```
 
-**Note:** The `-v not-env-data:/data` volume persists the SQLite database.
-
-### Restarting Standalone Container
+### Restarting Container
 
 To restart with the same master key (preserving encrypted data):
 
 ```bash
-# Stop and remove container (keeps volume)
+# Stop and remove container
 docker stop not-env-backend
 docker rm not-env-backend
 
 # Restart with saved master key
 docker run -d --name not-env-backend -p 1212:1212 \
-  -v not-env-data:/data \
+  -e DB_TYPE=postgres \
+  -e DB_HOST=postgres.example.com \
+  -e DB_PORT=5432 \
+  -e DB_USER=notenv \
+  -e DB_PASSWORD=secret \
+  -e DB_NAME=notenv \
   -e NOT_ENV_MASTER_KEY="<your-saved-master-key>" \
-  ghcr.io/not-env/not-env-standalone:latest
+  ghcr.io/not-env/not-env:latest
 ```
 
 **Warning:** If you lose the master key, all encrypted data becomes unrecoverable. Always save the master key from first startup logs.

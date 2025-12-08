@@ -1,4 +1,4 @@
-name: Build and Publish Docker Images
+name: Build and Publish Docker Image
 
 on:
   release:
@@ -35,7 +35,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push minimal image (multi-arch)
+      - name: Build and push backend image (multi-arch)
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -47,24 +47,6 @@ jobs:
           tags: |
             ghcr.io/not-env/not-env:${{ steps.version.outputs.version }}
             ghcr.io/not-env/not-env:latest
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-          labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-
-      - name: Build and push SQLite image (multi-arch)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.sqlite
-          platforms: linux/amd64,linux/arm64
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/not-env/not-env-standalone:${{ steps.version.outputs.version }}
-            ghcr.io/not-env/not-env-standalone:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |
